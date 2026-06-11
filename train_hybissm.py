@@ -8,12 +8,12 @@ except ImportError:
                            'mamba-ssm', '--no-build-isolation', '--quiet'])
 
 import os, random, time, warnings
+from pathlib import Path
 import numpy as np
 import scipy.io as sio
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import seaborn as sns
-from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -79,6 +79,8 @@ class CFG:
     # ── Output ────────────────────────────────────────────────────────────────
     SAVE_PATH    = 'hybissm_net_all10.pt'
     PROTO_PATH   = 'all10_prototypes.pt'
+
+# ── Data Loading & Split Helper Functions ─────────────────────────────────────
 
 def load_ohid1_scene(cfg, scene_idx):
     """
@@ -199,46 +201,6 @@ def make_splits(labels, cfg):
         stratify=temp_lbl, random_state=SEED)
 
     return train_idx, val_idx, test_idx
-
-# Load all 10 scenes and build ConcatDatasets
-# Also keep per-scene references for per-scene evaluation and prototype extraction
-
-print('Loading scenes...')
-scenes = {}   # {scene_id: (image, labels)}
-all_train_ds, all_val_ds, all_test_ds = [], [], []
-
-# Store per-scene split indices for later prototype extraction
-scene_splits = {}   # {scene_id: (train_idx, val_idx, test_idx)}
-
-for sid in CFG.ALL_SCENES:
-    image, labels = load_ohid1_scene(CFG, scene_idx=sid)
-    scenes[sid]   = (image, labels)
-
-    train_idx, val_idx, test_idx = make_splits(labels, CFG)
-    scene_splits[sid] = (train_idx, val_idx, test_idx)
-
-    all_train_ds.append(DualPatchDataset(image, labels, CFG, train_idx,
-                                         scene_id=sid, augment=True))
-    all_val_ds.append(DualPatchDataset(image, labels, CFG, val_idx,
-                                       scene_id=sid, augment=False))
-    all_test_ds.append(DualPatchDataset(image, labels, CFG, test_idx,
-                                        scene_id=sid, augment=False))
-
-train_loader = DataLoader(ConcatDataset(all_train_ds),
-                          batch_size=CFG.BATCH_SIZE, shuffle=True,
-                          num_workers=4, pin_memory=True, drop_last=True)
-val_loader   = DataLoader(ConcatDataset(all_val_ds),
-                          batch_size=CFG.BATCH_SIZE * 2, shuffle=False,
-                          num_workers=4, pin_memory=True)
-test_loader  = DataLoader(ConcatDataset(all_test_ds),
-                          batch_size=CFG.BATCH_SIZE * 2, shuffle=False,
-                          num_workers=4, pin_memory=True)
-
-total_train = sum(len(d) for d in all_train_ds)
-total_val   = sum(len(d) for d in all_val_ds)
-total_test  = sum(len(d) for d in all_test_ds)
-print(f'\nTotal — Train: {total_train:,}  Val: {total_val:,}  Test: {total_test:,}')
-print(f'Steps per epoch: {len(train_loader):,}')
 
 # ── Module 1: Spectral Encoder ────────────────────────────────────────────────
 
@@ -382,18 +344,7 @@ class HyBiSSMNet(nn.Module):
         logits = self.classifier(torch.cat([spec_feat, spat_feat], dim=-1))
         return logits, spec_feat, unmix_out, gate_val
 
-
-# Build model, wrap in DataParallel if 2 GPUs available
-_model = HyBiSSMNet(CFG).to(DEVICE)
-if N_GPUS > 1:
-    model = nn.DataParallel(_model)
-    print(f'DataParallel across {N_GPUS} GPUs')
-else:
-    model = _model
-
-total_params    = sum(p.numel() for p in _model.parameters())
-trainable_params = sum(p.numel() for p in _model.parameters() if p.requires_grad)
-print(f'Parameters : {total_params:,}  trainable: {trainable_params:,}')
+# ── Loss & Optimizer ─────────────────────────────────────────────────────────
 
 class HyBiSSMLoss(nn.Module):
     """
@@ -437,38 +388,7 @@ class HyBiSSMLoss(nn.Module):
                  + self.cfg.LAMBDA_MORPH    * L_morph)
         return total, L_CE, L_contrast, L_unmix
 
-
-criterion = HyBiSSMLoss(CFG).to(DEVICE)
-
-# Access underlying model params regardless of DataParallel wrapper
-raw_model = model.module if N_GPUS > 1 else model
-optimizer = torch.optim.AdamW(raw_model.parameters(),
-                              lr=CFG.LR, weight_decay=CFG.WEIGHT_DECAY)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-    optimizer, T_max=CFG.EPOCHS, eta_min=1e-6)
-
-RESUME_FROM_CHECKPOINT = True   # set False for fresh training
-
-if RESUME_FROM_CHECKPOINT:
-    ckpt = torch.load(CFG.SAVE_PATH, map_location=DEVICE, weights_only=False)
-    raw_model.load_state_dict(ckpt['model_state'])
-    optimizer.load_state_dict(ckpt['optimizer_state'])
-    
-    start_epoch = ckpt['epoch'] + 1
-    best_val_oa = ckpt['val_oa']
-    no_improve  = 0
-    
-    # Continue cosine schedule from where it left off
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=CFG.EPOCHS, eta_min=1e-6,
-        last_epoch=start_epoch - 2
-    )
-    print(f'Resumed from epoch {ckpt["epoch"]}  val OA={ckpt["val_oa"]:.4f}')
-    print(f'Continuing from epoch {start_epoch} → {CFG.EPOCHS}')
-else:
-    start_epoch = 1
-    best_val_oa = 0.0
-    no_improve  = 0
+# ── Epoch Runner Function ─────────────────────────────────────────────────────
 
 def run_epoch(loader, model, criterion, optimizer=None, device=DEVICE):
     training = optimizer is not None
@@ -478,6 +398,7 @@ def run_epoch(loader, model, criterion, optimizer=None, device=DEVICE):
     all_preds, all_labels = [], []
 
     ctx = torch.enable_grad() if training else torch.no_grad()
+    raw_m = model.module if hasattr(model, 'module') else model
     with ctx:
         for local_p, global_p, lbls, _ in loader:
             local_p  = local_p.to(device)
@@ -493,7 +414,7 @@ def run_epoch(loader, model, criterion, optimizer=None, device=DEVICE):
             if training:
                 optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(raw_model.parameters(), max_norm=1.0)
+                nn.utils.clip_grad_norm_(raw_m.parameters(), max_norm=1.0)
                 optimizer.step()
 
             n = len(lbls)
@@ -506,196 +427,300 @@ def run_epoch(loader, model, criterion, optimizer=None, device=DEVICE):
     kappa = cohen_kappa_score(all_labels, all_preds)
     cm    = confusion_matrix(all_labels, all_preds,
                              labels=list(range(CFG.N_CLASSES)))
-    aa    = (cm.diagonal() / (cm.sum(axis=1) + 1e-8)).mean()
+    
+    # Fix: Calculate AA robustly by only averaging over classes that have ground-truth samples
+    class_counts = cm.sum(axis=1)
+    recalls = cm.diagonal() / (class_counts + 1e-8)
+    valid_classes = class_counts > 0
+    aa = recalls[valid_classes].mean() if valid_classes.sum() > 0 else 0.0
+    
     N     = len(all_labels)
     return total_loss / N, ce_loss_sum / N, oa, aa, kappa
 
+# ── Main Guarded Script Execution ─────────────────────────────────────────────
 
-history = {k: [] for k in
-           ['train_loss','val_loss','train_oa','val_oa',
-            'train_aa','val_aa','train_kappa','val_kappa']}
+if __name__ == '__main__':
+    # Load all 10 scenes and build ConcatDatasets
+    # Also keep per-scene references for per-scene evaluation and prototype extraction
 
-best_val_oa = 0.0
-no_improve  = 0
+    print('Loading scenes...')
+    scenes = {}   # {scene_id: (image, labels)}
+    all_train_ds, all_val_ds, all_test_ds = [], [], []
 
-print(f'{"Epoch":>6}  {"Tr.Loss":>8}  {"Tr.OA":>7}  '
-      f'{"Val.Loss":>8}  {"Val.OA":>7}  {"Val.AA":>7}  {"Val.K":>7}  {"LR":>9}')
-print('-' * 80)
+    # Store per-scene split indices for later prototype extraction
+    scene_splits = {}   # {scene_id: (train_idx, val_idx, test_idx)}
 
-t0 = time.time()
-for epoch in range(start_epoch, CFG.EPOCHS + 1):
-    tr = run_epoch(train_loader, model, criterion, optimizer)
-    vl = run_epoch(val_loader,   model, criterion)
-    scheduler.step()
-    lr = scheduler.get_last_lr()[0]
+    for sid in CFG.ALL_SCENES:
+        image, labels = load_ohid1_scene(CFG, scene_idx=sid)
+        scenes[sid]   = (image, labels)
 
-    for key, val in zip(
-        ['train_loss','val_loss','train_oa','val_oa',
-         'train_aa','val_aa','train_kappa','val_kappa'],
-        [tr[0], vl[0], tr[2], vl[2], tr[3], vl[3], tr[4], vl[4]]):
-        history[key].append(val)
+        train_idx, val_idx, test_idx = make_splits(labels, CFG)
+        scene_splits[sid] = (train_idx, val_idx, test_idx)
 
-    if epoch % 5 == 0 or epoch == 1:
-        elapsed = (time.time() - t0) / 60
-        print(f'{epoch:>6}  {tr[0]:>8.4f}  {tr[2]:>7.4f}  '
-              f'{vl[0]:>8.4f}  {vl[2]:>7.4f}  {vl[3]:>7.4f}  '
-              f'{vl[4]:>7.4f}  {lr:>9.2e}  [{elapsed:.0f}m]')
+        all_train_ds.append(DualPatchDataset(image, labels, CFG, train_idx,
+                                             scene_id=sid, augment=True))
+        all_val_ds.append(DualPatchDataset(image, labels, CFG, val_idx,
+                                           scene_id=sid, augment=False))
+        all_test_ds.append(DualPatchDataset(image, labels, CFG, test_idx,
+                                            scene_id=sid, augment=False))
 
-    if vl[2] > best_val_oa:
-        best_val_oa = vl[2]
-        no_improve  = 0
-        cfg_dict = {k: v for k, v in CFG.__dict__.items()
-                    if not k.startswith('__') and not callable(v)}
-        torch.save({
-            'epoch':           epoch,
-            'model_state':     raw_model.state_dict(),
-            'optimizer_state': optimizer.state_dict(),
-            'val_oa':          vl[2],
-            'val_aa':          vl[3],
-            'val_kappa':       vl[4],
-            'cfg':             cfg_dict,
-        }, CFG.SAVE_PATH)
+    train_loader = DataLoader(ConcatDataset(all_train_ds),
+                              batch_size=CFG.BATCH_SIZE, shuffle=True,
+                              num_workers=4, pin_memory=True, drop_last=True)
+    val_loader   = DataLoader(ConcatDataset(all_val_ds),
+                              batch_size=CFG.BATCH_SIZE * 2, shuffle=False,
+                              num_workers=4, pin_memory=True)
+    test_loader  = DataLoader(ConcatDataset(all_test_ds),
+                              batch_size=CFG.BATCH_SIZE * 2, shuffle=False,
+                              num_workers=4, pin_memory=True)
+
+    total_train = sum(len(d) for d in all_train_ds)
+    total_val   = sum(len(d) for d in all_val_ds)
+    total_test  = sum(len(d) for d in all_test_ds)
+    print(f'\nTotal — Train: {total_train:,}  Val: {total_val:,}  Test: {total_test:,}')
+    print(f'Steps per epoch: {len(train_loader):,}')
+
+    # Build model, wrap in DataParallel if 2 GPUs available
+    _model = HyBiSSMNet(CFG).to(DEVICE)
+    if N_GPUS > 1:
+        model = nn.DataParallel(_model)
+        print(f'DataParallel across {N_GPUS} GPUs')
     else:
-        no_improve += 1
-        if no_improve >= CFG.PATIENCE:
-            print(f'\nEarly stopping at epoch {epoch}.')
-            break
+        model = _model
 
-total_min = (time.time() - t0) / 60
-print(f'\nDone in {total_min:.1f} min  |  Best val OA: {best_val_oa:.4f}')
+    total_params    = sum(p.numel() for p in _model.parameters())
+    trainable_params = sum(p.numel() for p in _model.parameters() if p.requires_grad)
+    print(f'Parameters : {total_params:,}  trainable: {trainable_params:,}')
 
-ep = range(1, len(history['train_loss']) + 1)
-fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    criterion = HyBiSSMLoss(CFG).to(DEVICE)
 
-axes[0].plot(ep, history['train_loss'], label='Train', color='#534AB7')
-axes[0].plot(ep, history['val_loss'],   label='Val',   color='#D85A30')
-axes[0].set_title('Loss'); axes[0].set_xlabel('Epoch')
-axes[0].legend(); axes[0].grid(alpha=0.3)
+    # Access underlying model params regardless of DataParallel wrapper
+    raw_model = model.module if N_GPUS > 1 else model
+    optimizer = torch.optim.AdamW(raw_model.parameters(),
+                                  lr=CFG.LR, weight_decay=CFG.WEIGHT_DECAY)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=CFG.EPOCHS, eta_min=1e-6)
 
-axes[1].plot(ep, history['train_oa'], label='Train OA', color='#534AB7')
-axes[1].plot(ep, history['val_oa'],   label='Val OA',   color='#D85A30')
-axes[1].plot(ep, history['val_aa'],   label='Val AA',   color='#1D9E75', linestyle='--')
-axes[1].set_title('OA & AA'); axes[1].set_xlabel('Epoch')
-axes[1].set_ylim([0, 1]); axes[1].legend(); axes[1].grid(alpha=0.3)
+    RESUME_FROM_CHECKPOINT = True   # set False for fresh training
 
-axes[2].plot(ep, history['train_kappa'], label='Train κ', color='#534AB7')
-axes[2].plot(ep, history['val_kappa'],   label='Val κ',   color='#D85A30')
-axes[2].set_title('Kappa'); axes[2].set_xlabel('Epoch')
-axes[2].set_ylim([0, 1]); axes[2].legend(); axes[2].grid(alpha=0.3)
+    if RESUME_FROM_CHECKPOINT:
+        # Load best checkpoint
+        ckpt = torch.load(CFG.SAVE_PATH, map_location=DEVICE, weights_only=False)
+        raw_model.load_state_dict(ckpt['model_state'])
+        optimizer.load_state_dict(ckpt['optimizer_state'])
+        
+        start_epoch = ckpt['epoch'] + 1
+        best_val_oa = ckpt['val_oa']
+        no_improve  = 0
+        
+        # Continue cosine schedule from where it left off
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=CFG.EPOCHS, eta_min=1e-6,
+            last_epoch=start_epoch - 2
+        )
+        print(f'Resumed from epoch {ckpt["epoch"]}  val OA={ckpt["val_oa"]:.4f}')
+        print(f'Continuing from epoch {start_epoch} → {CFG.EPOCHS}')
+    else:
+        start_epoch = 1
+        best_val_oa = 0.0
+        no_improve  = 0
 
-plt.suptitle('Hy-BiSSM — All 10 Scenes', y=1.02, fontsize=13)
-plt.tight_layout()
-plt.savefig('learning_curves.png', dpi=150, bbox_inches='tight')
-plt.show()
+    history = {k: [] for k in
+               ['train_loss','val_loss','train_oa','val_oa',
+                'train_aa','val_aa','train_kappa','val_kappa']}
 
-# Load best checkpoint
-ckpt = torch.load(CFG.SAVE_PATH, map_location=DEVICE)
-raw_model.load_state_dict(ckpt['model_state'])
-print(f"Checkpoint epoch {ckpt['epoch']}  val OA={ckpt['val_oa']:.4f}")
+    # Fix: Only override best_val_oa and no_improve if not resuming
+    if not RESUME_FROM_CHECKPOINT:
+        best_val_oa = 0.0
+        no_improve  = 0
 
-# ── Overall test metrics ───────────────────────────────────────────────────────
-_, _, oa, aa, kap = run_epoch(test_loader, model, criterion)
-print(f'\nOverall Test — OA: {oa:.4f}  AA: {aa:.4f}  Kappa: {kap:.4f}')
+    print(f'{"Epoch":>6}  {"Tr.Loss":>8}  {"Tr.OA":>7}  '
+          f'{"Val.Loss":>8}  {"Val.OA":>7}  {"Val.AA":>7}  {"Val.K":>7}  {"LR":>9}')
+    print('-' * 80)
 
-# ── Per-scene test metrics ────────────────────────────────────────────────────
-print('\nPer-scene breakdown:')
-print(f'{"Scene":>6}  {"OA":>7}  {"AA":>7}  {"Kappa":>7}  {"N_test":>8}')
-print('-' * 48)
+    t0 = time.time()
+    for epoch in range(start_epoch, CFG.EPOCHS + 1):
+        tr = run_epoch(train_loader, model, criterion, optimizer)
+        vl = run_epoch(val_loader,   model, criterion)
+        scheduler.step()
+        lr = scheduler.get_last_lr()[0]
 
-scene_metrics = {}
-for sid in CFG.ALL_SCENES:
-    image, labels     = scenes[sid]
-    _, val_idx, test_idx = scene_splits[sid]
-    ds     = DualPatchDataset(image, labels, CFG, test_idx,
-                              scene_id=sid, augment=False)
-    loader = DataLoader(ds, batch_size=512, shuffle=False, num_workers=2)
-    _, _, s_oa, s_aa, s_kap = run_epoch(loader, model, criterion)
-    scene_metrics[sid] = (s_oa, s_aa, s_kap)
-    print(f'{sid:>6}  {s_oa:>7.4f}  {s_aa:>7.4f}  {s_kap:>7.4f}  {len(ds):>8,}')
+        for key, val in zip(
+            ['train_loss','val_loss','train_oa','val_oa',
+             'train_aa','val_aa','train_kappa','val_kappa'],
+            [tr[0], vl[0], tr[2], vl[2], tr[3], vl[3], tr[4], vl[4]]):
+            history[key].append(val)
 
-# ── Confusion matrix on full test set ─────────────────────────────────────────
-model.eval()
-all_preds, all_labels = [], []
-all_spec_feats = []
+        if epoch % 5 == 0 or epoch == 1:
+            elapsed = (time.time() - t0) / 60
+            print(f'{epoch:>6}  {tr[0]:>8.4f}  {tr[2]:>7.4f}  '
+                  f'{vl[0]:>8.4f}  {vl[2]:>7.4f}  {vl[3]:>7.4f}  '
+                  f'{vl[4]:>7.4f}  {lr:>9.2e}  [{elapsed:.0f}m]')
 
-with torch.no_grad():
-    for lp, gp, lbls, _ in test_loader:
-        logits, sf, _, _ = model(lp.to(DEVICE), gp.to(DEVICE))
-        all_preds.extend(logits.argmax(1).cpu().numpy())
-        all_labels.extend(lbls.numpy())
-        all_spec_feats.append(sf.cpu())
+        if vl[2] > best_val_oa:
+            best_val_oa = vl[2]
+            no_improve  = 0
+            cfg_dict = {k: v for k, v in CFG.__dict__.items()
+                        if not k.startswith('__') and not callable(v)}
+            
+            # Fix: Ensure checkpoint parent directory exists before saving
+            save_dir = os.path.dirname(CFG.SAVE_PATH)
+            if save_dir:
+                os.makedirs(save_dir, exist_ok=True)
+                
+            torch.save({
+                'epoch':           epoch,
+                'model_state':     raw_model.state_dict(),
+                'optimizer_state': optimizer.state_dict(),
+                'val_oa':          vl[2],
+                'val_aa':          vl[3],
+                'val_kappa':       vl[4],
+                'cfg':             cfg_dict,
+            }, CFG.SAVE_PATH)
+        else:
+            no_improve += 1
+            if no_improve >= CFG.PATIENCE:
+                print(f'\nEarly stopping at epoch {epoch}.')
+                break
 
-all_spec_feats = torch.cat(all_spec_feats, dim=0)
+    total_min = (time.time() - t0) / 60
+    print(f'\nDone in {total_min:.1f} min  |  Best val OA: {best_val_oa:.4f}')
 
-cm      = confusion_matrix(all_labels, all_preds, labels=list(range(CFG.N_CLASSES)))
-cm_norm = cm.astype(float) / (cm.sum(axis=1, keepdims=True) + 1e-8)
+    ep = range(1, len(history['train_loss']) + 1)
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
 
-fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-for ax, data, fmt, title in zip(
-    axes, [cm, cm_norm], ['d', '.2f'],
-    ['Counts', 'Row-normalised recall']):
-    sns.heatmap(data, annot=True, fmt=fmt, cmap='Blues',
-                xticklabels=CFG.CLASS_NAMES,
-                yticklabels=CFG.CLASS_NAMES,
-                ax=ax, linewidths=0.5)
-    ax.set_title(title)
-    ax.set_xlabel('Predicted'); ax.set_ylabel('True')
-    plt.setp(ax.get_xticklabels(), rotation=30, ha='right')
+    axes[0].plot(ep, history['train_loss'], label='Train', color='#534AB7')
+    axes[0].plot(ep, history['val_loss'],   label='Val',   color='#D85A30')
+    axes[0].set_title('Loss'); axes[0].set_xlabel('Epoch')
+    axes[0].legend(); axes[0].grid(alpha=0.3)
 
-ri = CFG.CLASS_NAMES.index('Road')
-bi = CFG.CLASS_NAMES.index('Building')
-for ax in axes:
-    ax.add_patch(plt.Rectangle((bi, ri), 1, 1, fill=False,
-                                edgecolor='red',    lw=2.5))
-    ax.add_patch(plt.Rectangle((ri, bi), 1, 1, fill=False,
-                                edgecolor='orange', lw=2.5))
+    axes[1].plot(ep, history['train_oa'], label='Train OA', color='#534AB7')
+    axes[1].plot(ep, history['val_oa'],   label='Val OA',   color='#D85A30')
+    axes[1].plot(ep, history['val_aa'],   label='Val AA',   color='#1D9E75', linestyle='--')
+    axes[1].set_title('OA & AA'); axes[1].set_xlabel('Epoch')
+    axes[1].set_ylim([0, 1]); axes[1].legend(); axes[1].grid(alpha=0.3)
 
-plt.suptitle(f'All-Scene — OA={oa:.4f}  AA={aa:.4f}  κ={kap:.4f}',
-             fontsize=13, y=1.01)
-plt.tight_layout()
-plt.savefig('confusion_matrix.png', dpi=150, bbox_inches='tight')
-plt.show()
-print(f'Road→Building : {cm_norm[ri,bi]:.3f}  Building→Road : {cm_norm[bi,ri]:.3f}')
+    axes[2].plot(ep, history['train_kappa'], label='Train κ', color='#534AB7')
+    axes[2].plot(ep, history['val_kappa'],   label='Val κ',   color='#D85A30')
+    axes[2].set_title('Kappa'); axes[2].set_xlabel('Epoch')
+    axes[2].set_ylim([0, 1]); axes[2].legend(); axes[2].grid(alpha=0.3)
 
-print('Extracting prototypes for all 10 scenes...')
-raw_model.eval()
-all_prototypes = {}   # {scene_id: {class_id: tensor(SPEC_DIM)}}
+    plt.suptitle('Hy-BiSSM — All 10 Scenes', y=1.02, fontsize=13)
+    plt.tight_layout()
+    # Fix: Use local relative path for plotting instead of absolute Kaggle path
+    plt.savefig('learning_curves.png', dpi=150, bbox_inches='tight')
+    plt.show()
 
-for sid in CFG.ALL_SCENES:
-    image, labels = scenes[sid]
-    rows, cols    = np.where(labels > 0)
-    all_idx       = list(zip(rows.tolist(), cols.tolist()))
-    ds     = DualPatchDataset(image, labels, CFG, all_idx,
-                              scene_id=sid, augment=False)
-    loader = DataLoader(ds, batch_size=512, shuffle=False,
-                        num_workers=2, pin_memory=True)
+    # Load best checkpoint
+    ckpt = torch.load(CFG.SAVE_PATH, map_location=DEVICE)
+    raw_model.load_state_dict(ckpt['model_state'])
+    print(f"Checkpoint epoch {ckpt['epoch']}  val OA={ckpt['val_oa']:.4f}")
 
-    feats, lbls = [], []
+    # ── Overall test metrics ───────────────────────────────────────────────────────
+    _, _, oa, aa, kap = run_epoch(test_loader, model, criterion)
+    print(f'\nOverall Test — OA: {oa:.4f}  AA: {aa:.4f}  Kappa: {kap:.4f}')
+
+    # ── Per-scene test metrics ────────────────────────────────────────────────────
+    print('\nPer-scene breakdown:')
+    print(f'{"Scene":>6}  {"OA":>7}  {"AA":>7}  {"Kappa":>7}  {"N_test":>8}')
+    print('-' * 48)
+
+    scene_metrics = {}
+    for sid in CFG.ALL_SCENES:
+        image, labels     = scenes[sid]
+        _, val_idx, test_idx = scene_splits[sid]
+        ds     = DualPatchDataset(image, labels, CFG, test_idx,
+                                  scene_id=sid, augment=False)
+        loader = DataLoader(ds, batch_size=512, shuffle=False, num_workers=2)
+        _, _, s_oa, s_aa, s_kap = run_epoch(loader, model, criterion)
+        scene_metrics[sid] = (s_oa, s_aa, s_kap)
+        print(f'{sid:>6}  {s_oa:>7.4f}  {s_aa:>7.4f}  {s_kap:>7.4f}  {len(ds):>8,}')
+
+    # ── Confusion matrix on full test set ─────────────────────────────────────────
+    model.eval()
+    all_preds, all_labels = [], []
+
     with torch.no_grad():
-        for lp, gp, l, _ in loader:
-            _, sf, _, _ = model(lp.to(DEVICE), gp.to(DEVICE))
-            feats.append(sf.cpu())
-            lbls.append(l)
+        for lp, gp, lbls, _ in test_loader:
+            logits, sf, _, _ = model(lp.to(DEVICE), gp.to(DEVICE))
+            all_preds.extend(logits.argmax(1).cpu().numpy())
+            all_labels.extend(lbls.numpy())
 
-    feats = torch.cat(feats)
-    lbls  = torch.cat(lbls).numpy()
+    cm      = confusion_matrix(all_labels, all_preds, labels=list(range(CFG.N_CLASSES)))
+    cm_norm = cm.astype(float) / (cm.sum(axis=1, keepdims=True) + 1e-8)
 
-    proto_dict = {}
-    for c in range(CFG.N_CLASSES):
-        mask = lbls == c
-        proto_dict[c] = feats[mask].mean(0) if mask.sum() > 0 \
-                        else torch.zeros(CFG.SPEC_DIM)
-    all_prototypes[sid] = proto_dict
-    print(f'  Scene {sid:>2} done')
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    for ax, data, fmt, title in zip(
+        axes, [cm, cm_norm], ['d', '.2f'],
+        ['Counts', 'Row-normalised recall']):
+        sns.heatmap(data, annot=True, fmt=fmt, cmap='Blues',
+                    xticklabels=CFG.CLASS_NAMES,
+                    yticklabels=CFG.CLASS_NAMES,
+                    ax=ax, linewidths=0.5)
+        ax.set_title(title)
+        ax.set_xlabel('Predicted'); ax.set_ylabel('True')
+        plt.setp(ax.get_xticklabels(), rotation=30, ha='right')
 
-torch.save({
-    'prototypes':    all_prototypes,
-    'scene_metrics': scene_metrics,
-    'overall':       {'oa': oa, 'aa': aa, 'kappa': kap},
-    'epoch':         ckpt['epoch'],
-}, CFG.PROTO_PATH)
+    ri = CFG.CLASS_NAMES.index('Road')
+    bi = CFG.CLASS_NAMES.index('Building')
+    for ax in axes:
+        ax.add_patch(plt.Rectangle((bi, ri), 1, 1, fill=False,
+                                    edgecolor='red',    lw=2.5))
+        ax.add_patch(plt.Rectangle((ri, bi), 1, 1, fill=False,
+                                    edgecolor='orange', lw=2.5))
 
-print(f'\nSaved:')
-print(f'  {CFG.SAVE_PATH}')
-print(f'  {CFG.PROTO_PATH}')
-print(f'\nTraining complete — OA: {oa:.4f}  AA: {aa:.4f}  Kappa: {kap:.4f}')
+    plt.suptitle(f'All-Scene — OA={oa:.4f}  AA={aa:.4f}  κ={kap:.4f}',
+                 fontsize=13, y=1.01)
+    plt.tight_layout()
+    # Fix: Use local relative path for plotting instead of absolute Kaggle path
+    plt.savefig('confusion_matrix.png', dpi=150, bbox_inches='tight')
+    plt.show()
+    print(f'Road→Building : {cm_norm[ri,bi]:.3f}  Building→Road : {cm_norm[bi,ri]:.3f}')
+
+    print('Extracting prototypes for all 10 scenes...')
+    raw_model.eval()
+    all_prototypes = {}   # {scene_id: {class_id: tensor(SPEC_DIM)}}
+
+    for sid in CFG.ALL_SCENES:
+        image, labels = scenes[sid]
+        rows, cols    = np.where(labels > 0)
+        all_idx       = list(zip(rows.tolist(), cols.tolist()))
+        ds     = DualPatchDataset(image, labels, CFG, all_idx,
+                                  scene_id=sid, augment=False)
+        loader = DataLoader(ds, batch_size=512, shuffle=False,
+                            num_workers=2, pin_memory=True)
+
+        feats, lbls = [], []
+        with torch.no_grad():
+            for lp, gp, l, _ in loader:
+                _, sf, _, _ = model(lp.to(DEVICE), gp.to(DEVICE))
+                feats.append(sf.cpu())
+                lbls.append(l)
+
+        feats = torch.cat(feats)
+        lbls  = torch.cat(lbls).numpy()
+
+        proto_dict = {}
+        for c in range(CFG.N_CLASSES):
+            mask = lbls == c
+            proto_dict[c] = feats[mask].mean(0) if mask.sum() > 0 \
+                            else torch.zeros(CFG.SPEC_DIM)
+        all_prototypes[sid] = proto_dict
+        print(f'  Scene {sid:>2} done')
+
+    # Fix: Ensure prototype parent directory exists before saving
+    proto_dir = os.path.dirname(CFG.PROTO_PATH)
+    if proto_dir:
+        os.makedirs(proto_dir, exist_ok=True)
+        
+    torch.save({
+        'prototypes':    all_prototypes,
+        'scene_metrics': scene_metrics,
+        'overall':       {'oa': oa, 'aa': aa, 'kappa': kap},
+        'epoch':         ckpt['epoch'],
+    }, CFG.PROTO_PATH)
+
+    print(f'\nSaved:')
+    print(f'  {CFG.SAVE_PATH}')
+    print(f'  {CFG.PROTO_PATH}')
+    print(f'\nTraining complete — OA: {oa:.4f}  AA: {aa:.4f}  Kappa: {kap:.4f}')

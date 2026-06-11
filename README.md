@@ -173,14 +173,14 @@ Default run: **only** $L_{CE}$ is active (`λ_c = λ_u = λ_m = 0.0`).
 
 ### Confusion Matrix (All 10 Scenes, Test Split)
 
-![Confusion Matrix](hybissm_confusion_matrix.png)
+![Confusion Matrix](fig_cm_hybissm.png)
 
 Red box: Road→Building confusion (23 % of Roads mis-classified as Building).  
 Orange box: Building→Road confusion (< 1 %).
 
 ### Scene-wise Predictions (Input · Ground Truth · Prediction)
 
-![Scene Predictions](hybissm_predictions.png)
+![Scene Predictions](fig_predmap_hybissm.png)
 
 ---
 

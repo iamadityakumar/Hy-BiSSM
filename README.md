@@ -241,4 +241,4 @@ If you use this work, please cite the OHID-1 dataset paper and acknowledge the H
 
 ---
 
-*Hy-BiSSM — Minor Project, IIIT Bangalore, 6th Semester, 2026*
+*Hy-BiSSM — Minor Project, IIIT Bhopal, 6th Semester, 2026*

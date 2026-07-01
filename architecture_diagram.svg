@@ -1,0 +1,165 @@
+<svg viewBox="0 0 940 1120" xmlns="http://www.w3.org/2000/svg" font-family="Georgia, 'Times New Roman', serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#444"/>
+    </marker>
+  </defs>
+
+  <style>
+    .box { stroke-width: 1.5; }
+    .lbl-bold { font-weight: bold; font-size: 14px; fill: #222; }
+    .lbl-sub  { font-size: 12.5px; fill: #333; }
+    .lbl-math { font-size: 12px; fill: #333; font-style: italic; }
+    .edge { fill: none; stroke: #444; stroke-width: 1.4; marker-end: url(#arrow); }
+    .wire { fill: none; stroke: #444; stroke-width: 1.4; }
+    .section-title { font-size: 15px; font-weight: bold; }
+  </style>
+
+  <!-- ============ INPUT ============ -->
+  <rect x="390" y="16" width="160" height="46" rx="6" class="box" fill="#f4f4f4" stroke="#888"/>
+  <text x="470" y="36" text-anchor="middle" class="lbl-bold">Input Patch</text>
+  <text x="470" y="52" text-anchor="middle" class="lbl-sub">25 × 25 × 32</text>
+
+  <!-- Split point -->
+  <path d="M470,62 L470,80" class="wire"/>
+  <path d="M180,80 L760,80" class="wire"/>
+  <path d="M180,80 L180,100" class="edge"/>
+  <path d="M760,80 L760,100" class="edge"/>
+
+  <!-- ============ MODULE 1 CONTAINER ============ -->
+  <rect x="30" y="100" width="410" height="570" rx="10" fill="#f8effc" stroke="#c9a6e0" stroke-width="1.5"/>
+  <text x="235" y="128" text-anchor="middle" class="section-title" fill="#7a3fa0">Module 1: Spectral Encoder</text>
+
+  <!-- Centre Pixel -->
+  <rect x="115" y="145" width="240" height="48" rx="6" class="box" fill="#f1e2fa" stroke="#9b59b6"/>
+  <text x="235" y="165" text-anchor="middle" class="lbl-bold">Centre Pixel</text>
+  <text x="235" y="182" text-anchor="middle" class="lbl-math">s ∈ ℝ³²</text>
+
+  <!-- split to Mamba Fwd/Bwd -->
+  <path d="M235,193 L235,208" class="wire"/>
+  <path d="M115,208 L355,208" class="wire"/>
+  <path d="M115,208 L115,225" class="edge"/>
+  <path d="M355,208 L355,225" class="edge"/>
+
+  <!-- Mamba Fwd -->
+  <rect x="55" y="225" width="120" height="52" rx="6" class="box" fill="#f1e2fa" stroke="#9b59b6"/>
+  <text x="115" y="246" text-anchor="middle" class="lbl-bold">Mamba Fwd</text>
+  <text x="115" y="263" text-anchor="middle" class="lbl-math">F_fwd ∈ ℝ⁶⁴</text>
+
+  <!-- Mamba Bwd -->
+  <rect x="295" y="225" width="120" height="52" rx="6" class="box" fill="#f1e2fa" stroke="#9b59b6"/>
+  <text x="355" y="246" text-anchor="middle" class="lbl-bold">Mamba Bwd</text>
+  <text x="355" y="263" text-anchor="middle" class="lbl-math">F_bwd ∈ ℝ⁶⁴</text>
+
+  <!-- merge to Linear Proj -->
+  <path d="M115,277 L115,300 L235,300" class="wire"/>
+  <path d="M355,277 L355,300 L235,300" class="wire"/>
+  <path d="M235,300 L235,313" class="edge"/>
+
+  <!-- Linear Proj -->
+  <rect x="140" y="313" width="190" height="52" rx="6" class="box" fill="#f1e2fa" stroke="#9b59b6"/>
+  <text x="235" y="334" text-anchor="middle" class="lbl-bold">Linear Proj.</text>
+  <text x="235" y="351" text-anchor="middle" class="lbl-math">F_mamba ∈ ℝ⁶⁴</text>
+
+  <path d="M235,365 L235,382" class="edge"/>
+
+  <!-- NIR Wedge Separator -->
+  <rect x="110" y="382" width="250" height="58" rx="6" class="box" fill="#f1e2fa" stroke="#9b59b6"/>
+  <text x="235" y="401" text-anchor="middle" class="lbl-bold">NIR Wedge Separator</text>
+  <text x="235" y="417" text-anchor="middle" class="lbl-sub">bands 20–32</text>
+  <text x="235" y="433" text-anchor="middle" class="lbl-math">F_nir ∈ ℝ¹⁶</text>
+
+  <path d="M235,440 L235,457" class="edge"/>
+
+  <!-- LN + GELU -->
+  <rect x="120" y="457" width="230" height="52" rx="6" class="box" fill="#f1e2fa" stroke="#9b59b6"/>
+  <text x="235" y="478" text-anchor="middle" class="lbl-bold">LN + GELU</text>
+  <text x="235" y="495" text-anchor="middle" class="lbl-math">F_spec ∈ ℝ⁶⁴</text>
+
+  <!-- ============ MODULE 2 CONTAINER ============ -->
+  <rect x="460" y="100" width="450" height="340" rx="10" fill="#eaf7f4" stroke="#7fc4b4" stroke-width="1.5"/>
+  <text x="685" y="128" text-anchor="middle" class="section-title" fill="#1f7a68">Module 2: Dual-Scale Spatial Context</text>
+
+  <!-- Full Patch -->
+  <rect x="605" y="145" width="160" height="48" rx="6" class="box" fill="#dff2ec" stroke="#2a9d8f"/>
+  <text x="685" y="165" text-anchor="middle" class="lbl-bold">Full Patch</text>
+  <text x="685" y="182" text-anchor="middle" class="lbl-sub">25 × 25 × 32</text>
+
+  <!-- split to Local/Global -->
+  <path d="M685,193 L685,208" class="wire"/>
+  <path d="M550,208 L820,208" class="wire"/>
+  <path d="M550,208 L550,225" class="edge"/>
+  <path d="M820,208 L820,225" class="edge"/>
+
+  <!-- Local 3D-CNN -->
+  <rect x="480" y="225" width="140" height="62" rx="6" class="box" fill="#dff2ec" stroke="#2a9d8f"/>
+  <text x="550" y="246" text-anchor="middle" class="lbl-bold">Local 3D-CNN</text>
+  <text x="550" y="262" text-anchor="middle" class="lbl-sub">7 × 7 crop</text>
+  <text x="550" y="278" text-anchor="middle" class="lbl-math">F_local ∈ ℝ¹²⁸</text>
+
+  <!-- Global 3D-CNN -->
+  <rect x="750" y="225" width="140" height="62" rx="6" class="box" fill="#dff2ec" stroke="#2a9d8f"/>
+  <text x="820" y="246" text-anchor="middle" class="lbl-bold">Global 3D-CNN</text>
+  <text x="820" y="262" text-anchor="middle" class="lbl-sub">25 × 25</text>
+  <text x="820" y="278" text-anchor="middle" class="lbl-math">F_global ∈ ℝ¹²⁸</text>
+
+  <!-- to gate -->
+  <path d="M550,287 L550,308 L613,308" class="edge"/>
+  <path d="M820,287 L820,308 L757,308" class="edge"/>
+
+  <!-- Scalar Gate diamond -->
+  <polygon points="685,283 785,308 685,333 585,308" fill="#fde3e3" stroke="#d9534f" stroke-width="1.5"/>
+  <text x="685" y="304" text-anchor="middle" class="lbl-bold" font-size="12.5">Scalar Gate</text>
+  <text x="685" y="320" text-anchor="middle" class="lbl-math">g</text>
+
+  <path d="M685,333 L685,372" class="edge"/>
+
+  <!-- combine box -->
+  <rect x="580" y="372" width="210" height="58" rx="6" class="box" fill="#dff2ec" stroke="#2a9d8f"/>
+  <text x="685" y="389" text-anchor="middle" class="lbl-sub">g · F_local + (1−g) · F_global</text>
+  <text x="685" y="405" text-anchor="middle" class="lbl-bold">F_spat</text>
+  <text x="685" y="421" text-anchor="middle" class="lbl-math">∈ ℝ¹²⁸</text>
+
+  <!-- ============ MERGE TO CLASSIFICATION HEAD ============ -->
+  <path d="M235,509 L235,730" class="wire"/>
+  <path d="M685,430 L685,730" class="wire"/>
+  <path d="M235,730 L410,730" class="wire"/>
+  <path d="M685,730 L560,730" class="wire"/>
+  <path d="M485,730 L485,745" class="edge"/>
+
+  <!-- ============ CLASSIFICATION HEAD CONTAINER ============ -->
+  <rect x="360" y="650" width="250" height="440" rx="10" fill="#fdf3e4" stroke="#e0a95a" stroke-width="1.5"/>
+  <text x="485" y="678" text-anchor="middle" class="section-title" fill="#b3701a">Classification Head</text>
+
+  <!-- Concat -->
+  <rect x="385" y="745" width="200" height="50" rx="6" class="box" fill="#fdeccb" stroke="#e08e2f"/>
+  <text x="485" y="764" text-anchor="middle" class="lbl-bold">Concat</text>
+  <text x="485" y="780" text-anchor="middle" class="lbl-math">F_final ∈ ℝ¹⁹²</text>
+  <path d="M485,795 L485,810" class="edge"/>
+
+  <!-- FC256 -->
+  <rect x="385" y="810" width="200" height="65" rx="6" class="box" fill="#fdeccb" stroke="#e08e2f"/>
+  <text x="485" y="829" text-anchor="middle" class="lbl-bold" font-size="13">FC256 + LN</text>
+  <text x="485" y="845" text-anchor="middle" class="lbl-sub">+ GELU</text>
+  <text x="485" y="860" text-anchor="middle" class="lbl-sub">+ Drop(0.3)</text>
+  <path d="M485,875 L485,890" class="edge"/>
+
+  <!-- FC128 -->
+  <rect x="385" y="890" width="200" height="55" rx="6" class="box" fill="#fdeccb" stroke="#e08e2f"/>
+  <text x="485" y="911" text-anchor="middle" class="lbl-bold" font-size="13">FC128 + GELU</text>
+  <text x="485" y="928" text-anchor="middle" class="lbl-sub">+ Drop(0.2)</text>
+  <path d="M485,945 L485,960" class="edge"/>
+
+  <!-- FC7 -->
+  <rect x="385" y="960" width="200" height="50" rx="6" class="box" fill="#fdeccb" stroke="#e08e2f"/>
+  <text x="485" y="982" text-anchor="middle" class="lbl-bold" font-size="13">FC7 + Softmax</text>
+  <text x="485" y="998" text-anchor="middle" class="lbl-math">ŷ ∈ ℝ⁷</text>
+
+  <path d="M485,1010 L485,1030" class="wire"/>
+
+  <!-- LULC Label -->
+  <rect x="405" y="1030" width="160" height="46" rx="6" class="box" fill="#f4f4f4" stroke="#888"/>
+  <text x="485" y="1058" text-anchor="middle" class="lbl-bold">LULC Label</text>
+  <path d="M485,1010 L485,1030" class="edge"/>
+
+</svg>
